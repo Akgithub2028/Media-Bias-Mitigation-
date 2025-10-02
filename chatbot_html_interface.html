@@ -1,0 +1,426 @@
+<!-- chatbot_html_interface.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Media Bias Mitigation Assistant — Interactive Articles</title>
+  <style>
+    :root{
+      --bg:#f8fafc;
+      --card:#ffffff;
+      --muted:#64748b;
+      --accent:#0ea5a4;
+      --danger:#ef4444;
+      --glass: rgba(15,23,42,0.02);
+      font-family: Inter, system-ui, Arial, sans-serif;
+    }
+    body{margin:0;background:var(--bg);color:#0f172a}
+    .container{display:grid;grid-template-columns:260px 1fr 360px;gap:18px;padding:18px;height:100vh;box-sizing:border-box}
+    .sidebar{background:var(--card);padding:18px;border-radius:10px;box-shadow:0 6px 18px rgba(2,6,23,0.06);overflow:auto}
+    .chat-container{display:flex;flex-direction:column;background:var(--card);padding:12px;border-radius:10px;box-shadow:0 6px 18px rgba(2,6,23,0.06)}
+    .info-panel{background:var(--card);padding:12px;border-radius:10px;box-shadow:0 6px 18px rgba(2,6,23,0.06);overflow:auto}
+    h1{font-size:18px;margin:0 0 8px 0}
+    h2{font-size:14px;margin:0 0 8px 0;color:var(--muted)}
+    .event-list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+    .event-btn{padding:10px;border-radius:8px;border:1px solid #e6eef2;background:transparent;cursor:pointer;text-align:left}
+    .event-btn.active{background:linear-gradient(90deg,#e6fffa,#ecfeff);border-color:var(--accent)}
+    .chat-messages{flex:1;padding:12px;overflow:auto;border-radius:8px;border:1px solid #eef2f7;background:linear-gradient(180deg,#fff,#f8fbfc)}
+    .message{display:flex;gap:10px;margin-bottom:10px}
+    .message.user{justify-content:flex-end}
+    .message .message-avatar{width:44px;height:44px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:var(--glass);font-weight:600}
+    .message .message-content{max-width:75%;padding:10px;border-radius:8px;background:#fff;box-shadow:0 4px 12px rgba(2,6,23,0.04)}
+    .chat-input{display:flex;gap:8px;padding-top:8px}
+    .chat-input input{flex:1;padding:10px;border-radius:8px;border:1px solid #e6eef2}
+    .send-btn{padding:10px 14px;border-radius:8px;background:var(--accent);color:white;border:none;cursor:pointer}
+    .loading-overlay{position:fixed;left:0;top:0;right:0;bottom:0;display:none;align-items:center;justify-content:center;background:rgba(255,255,255,0.6);z-index:40}
+    .loading-overlay.active{display:flex}
+    .loader{width:44px;height:44px;border-radius:50%;border:4px solid #e6eef2;border-top-color:var(--accent);animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* Article list styles */
+    .article-list{display:flex;flex-direction:column;gap:12px;margin-top:8px}
+    .article-card{background:#fff;padding:12px;border-radius:10px;border:1px solid #eef2f7}
+    .article-row{display:flex;justify-content:space-between;align-items:center}
+    .article-title{font-weight:700;margin:0;font-size:14px}
+    .article-meta{font-size:12px;color:var(--muted)}
+    .article-actions{display:flex;gap:8px;margin-top:8px}
+    .pill{padding:6px 8px;border-radius:999px;background:#f1f5f9;font-size:12px}
+    .key-points{margin-top:10px;padding-left:14px}
+    .quote{margin-top:8px;padding:10px;border-left:3px solid #e6f9f8;background:#fbfffe}
+    .btn-small{padding:6px 8px;border-radius:8px;border:1px solid #e6eef2;background:transparent;cursor:pointer;font-size:13px}
+    .btn-primary{background:var(--accent);color:white;border:none}
+    .muted{color:var(--muted)}
+
+    /* Responsive */
+    @media (max-width:1000px){
+      .container{grid-template-columns:1fr;grid-template-rows:auto 1fr auto}
+      .info-panel{order:3}
+      .sidebar{order:1}
+    }
+  </style>
+</head>
+<body>
+  <div class="loading-overlay" id="loadingOverlay"><div class="loader"></div></div>
+
+  <div class="container">
+    <div class="sidebar">
+      <h2>📰 Policy Events</h2>
+      <div class="event-list" id="eventList">
+        <button class="event-btn" data-event="demonetization">💰 Demonetization</button>
+        <button class="event-btn" data-event="gst">📊 GST Reform</button>
+        <button class="event-btn" data-event="farmers_protest">🌾 Farmers' Protest</button>
+        <button class="event-btn" data-event="migrant_crisis">🚶 Migrant Crisis</button>
+        <button class="event-btn" data-event="ladakh_protests">⛰️ Ladakh Protests</button>
+      </div>
+
+      <div style="margin-top:20px">
+        <h2>Verbosity</h2>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="verbosityLow" class="btn-small">Low</button>
+          <button id="verbosityMed" class="btn-small btn-primary">Medium</button>
+          <button id="verbosityHigh" class="btn-small">High</button>
+        </div>
+
+        <h2 style="margin-top:18px">Quick Actions</h2>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+          <button id="fetchBtn" class="btn-small btn-primary">Request Articles</button>
+          <button id="analyzeBtn" class="btn-small">Run Bias Mitigation</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-container">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h1>🤖 Media Bias Mitigation Assistant</h1>
+        <div class="muted">Status: <strong style="color: #10b981">Online</strong></div>
+      </div>
+
+      <div class="chat-messages" id="chatMessages">
+        <div class="message bot">
+          <div class="message-avatar">🤖</div>
+          <div class="message-content">
+            <strong>Welcome!</strong> Select an event and press "Request Articles" to fetch interactive, detailed articles. You can increase verbosity for more data.
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-input">
+        <input type="text" id="userInput" placeholder="Type a message (e.g., 'Help', 'GST')"/>
+        <button id="sendBtn" class="send-btn">Send</button>
+      </div>
+    </div>
+
+    <div class="info-panel">
+      <h2>📄 Articles & Interactive Summary</h2>
+      <div id="articleContainer" class="article-list">
+        <p class="muted">No articles yet. Select an event and press "Request Articles".</p>
+      </div>
+
+      <div style="margin-top:16px;border-top:1px solid #eef2f7;padding-top:12px">
+        <h2>📊 Bias Analysis</h2>
+        <div id="biasMetrics">
+          <p class="muted">Run bias mitigation after fetching articles to see constituency coverage and severity.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* ------------ Client logic (interactive articles) ------------- */
+
+let currentEvent = null;
+let currentAspect = null;
+let currentVerbosity = 'medium'; // low | medium | high
+let currentArticles = [];
+
+const loadingOverlay = document.getElementById('loadingOverlay');
+const eventList = document.getElementById('eventList');
+const fetchBtn = document.getElementById('fetchBtn');
+const analyzeBtn = document.getElementById('analyzeBtn');
+const articleContainer = document.getElementById('articleContainer');
+const verbosityLow = document.getElementById('verbosityLow');
+const verbosityMed = document.getElementById('verbosityMed');
+const verbosityHigh = document.getElementById('verbosityHigh');
+const chatMessages = document.getElementById('chatMessages');
+const userInput = document.getElementById('userInput');
+const sendBtn = document.getElementById('sendBtn');
+
+document.addEventListener('DOMContentLoaded', () => {
+  setupEventListeners();
+});
+
+function setupEventListeners() {
+  // Event selection
+  eventList.addEventListener('click', (e) => {
+    const b = e.target.closest('.event-btn');
+    if (!b) return;
+    document.querySelectorAll('.event-btn').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    currentEvent = b.dataset.event;
+    addBotMessage(`Selected event: <strong>${currentEvent.replace('_',' ')}</strong>. Now pick an aspect via chat or press Request Articles.`);
+  });
+
+  // Verbosity buttons
+  verbosityLow.addEventListener('click', () => setVerbosity('low'));
+  verbosityMed.addEventListener('click', () => setVerbosity('medium'));
+  verbosityHigh.addEventListener('click', () => setVerbosity('high'));
+
+  fetchBtn.addEventListener('click', () => {
+    if (!currentEvent) return addBotMessage('Please select an event first from the left.');
+    // If user hasn't selected an aspect, ask via chat; but we'll default to first aspect via server chat endpoint
+    requestAspectsThenFetch();
+  });
+
+  analyzeBtn.addEventListener('click', () => {
+    if (!currentArticles.length) return addBotMessage('No articles fetched yet — fetch articles first.');
+    runMitigation();
+  });
+
+  sendBtn.addEventListener('click', handleUserSend);
+  userInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') handleUserSend();
+  });
+}
+
+function setVerbosity(v) {
+  currentVerbosity = v;
+  verbosityLow.classList.toggle('btn-primary', v === 'low');
+  verbosityMed.classList.toggle('btn-primary', v === 'medium');
+  verbosityHigh.classList.toggle('btn-primary', v === 'high');
+  addBotMessage(`Verbosity set to <strong>${v}</strong>.`);
+}
+
+async function requestAspectsThenFetch() {
+  showLoading();
+  try {
+    const resp = await fetch('/api/get_aspects', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({event: currentEvent})
+    });
+    const j = await resp.json();
+    if (!j.success) {
+      addBotMessage('Failed to get aspects for event.');
+      return;
+    }
+    // pick the first aspect as default to fetch (or you could prompt user)
+    const aspect = j.aspects && j.aspects.length ? j.aspects[0] : '';
+    currentAspect = aspect;
+    addBotMessage(`Fetching articles for aspect: <strong>${aspect}</strong> (verbosity: ${currentVerbosity})`);
+    await fetchArticles(currentEvent, currentAspect, false, currentVerbosity);
+  } catch (err) {
+    console.error(err);
+    addBotMessage('Error fetching aspects.');
+  } finally {
+    hideLoading();
+  }
+}
+
+async function fetchArticles(eventKey, aspect, fetch_live=false, verbosity='medium') {
+  showLoading();
+  try {
+    const resp = await fetch('/api/fetch_articles', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({event: eventKey, aspect: aspect, fetch_live: fetch_live, verbosity: verbosity})
+    });
+    const data = await resp.json();
+    if (!data.success) {
+      addBotMessage('Failed to fetch articles: ' + (data.error || 'unknown'));
+      return;
+    }
+    currentArticles = data.articles || [];
+    renderArticles(currentArticles);
+    addBotMessage(`Fetched ${currentArticles.length} articles for "<strong>${aspect}</strong>" (verbosity: ${verbosity}).`);
+  } catch (err) {
+    console.error(err);
+    addBotMessage('Error fetching articles. Is the server running?');
+  } finally {
+    hideLoading();
+  }
+}
+
+function renderArticles(articles) {
+  if (!articles || !articles.length) {
+    articleContainer.innerHTML = '<p class="muted">No articles available.</p>';
+    return;
+  }
+  articleContainer.innerHTML = '';
+  articles.forEach((a, idx) => {
+    const card = document.createElement('div');
+    card.className = 'article-card';
+    card.innerHTML = `
+      <div class="article-row">
+        <div style="max-width:70%">
+          <div class="article-title">${escapeHtml(a.title)}</div>
+          <div class="article-meta">${escapeHtml(a.source)} • ${new Date(a.published_at || Date.now()).toLocaleString()} • <span class="muted">Impact ${a.metrics?.estimated_impact_score ?? 'N/A'}</span></div>
+        </div>
+        <div style="text-align:right">
+          <div class="pill">${escapeHtml(a.aspect || a.event || '')}</div>
+        </div>
+      </div>
+
+      <p style="margin-top:10px;color:#0f172a">${escapeHtml(a.summary || a.content || '').slice(0,440)}${(a.summary||a.content||'').length > 440 ? '...' : ''}</p>
+
+      <div class="article-actions" data-idx="${idx}">
+        <button class="btn-small" data-action="expand">Read full</button>
+        <button class="btn-small" data-action="keypoints">Key points</button>
+        <button class="btn-small" data-action="quotes">Quotes</button>
+        <button class="btn-small" data-action="datasnippet">Data snippet</button>
+        <button class="btn-small" data-action="more" style="background:#f8fafc">Request more detail</button>
+      </div>
+
+      <div class="article-extra" id="extra-${idx}" style="display:none;margin-top:10px"></div>
+    `;
+    articleContainer.appendChild(card);
+
+    // attach delegated handlers
+    const actions = card.querySelector('.article-actions');
+    actions.addEventListener('click', (e) => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      handleArticleAction(action, idx);
+    });
+  });
+}
+
+/* Handle per-article UI interactions */
+function handleArticleAction(action, idx) {
+  const article = currentArticles[idx];
+  const extra = document.getElementById(`extra-${idx}`);
+  if (!article || !extra) return;
+
+  if (action === 'expand') {
+    extra.style.display = extra.style.display === 'none' ? 'block' : 'none';
+    extra.innerHTML = `<div style="white-space:pre-wrap">${escapeHtml(article.content || 'No content')}</div>`;
+  } else if (action === 'keypoints') {
+    extra.style.display = 'block';
+    extra.innerHTML = `<ul class="key-points">${(article.key_points||[]).map(k => `<li>${escapeHtml(k)}</li>`).join('')}</ul>`;
+  } else if (action === 'quotes') {
+    extra.style.display = 'block';
+    const quotes = (article.quotes||[]);
+    if (!quotes.length) {
+      extra.innerHTML = `<div class="muted">No quotes available.</div>`;
+    } else {
+      extra.innerHTML = quotes.map(q => `<div class="quote"><strong>${escapeHtml(q.speaker)}</strong><div style="margin-top:6px">${escapeHtml(q.text)}</div></div>`).join('');
+    }
+  } else if (action === 'datasnippet') {
+    extra.style.display = 'block';
+    if (!article.data_snippet) {
+      extra.innerHTML = `<div class="muted">No data snippet at this verbosity level. Click "Request more detail" for high verbosity.</div>`;
+    } else {
+      const ds = article.data_snippet;
+      extra.innerHTML = `<div><strong>Timeline</strong><ul>${(ds.timeline||[]).map(t=>`<li>${escapeHtml(t.date)} — ${escapeHtml(t.event)}</li>`).join('')}</ul></div>
+        <div style="margin-top:8px"><strong>Sample stats</strong><pre>${escapeHtml(JSON.stringify(ds.sample_stats,null,2))}</pre></div>`;
+    }
+  } else if (action === 'more') {
+    // Re-request detailed articles for this aspect with high verbosity and fetch_live true
+    addBotMessage(`Requesting higher-verbosity articles for <strong>${article.aspect || article.event}</strong>...`);
+    fetchArticles(article.event || currentEvent, article.aspect || currentAspect || article.aspect, true, 'high');
+  }
+}
+
+/* Run bias mitigation on current articles */
+async function runMitigation() {
+  showLoading();
+  try {
+    const resp = await fetch('/api/mitigate_bias', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ articles: currentArticles, summary_type: 'humanized' })
+    });
+    const j = await resp.json();
+    if (!j.success) {
+      addBotMessage('Bias mitigation failed: ' + (j.error || 'unknown'));
+      return;
+    }
+    displayBiasMetrics(j.bias_metrics || {});
+    addBotMessage(`<strong>Bias-mitigated summary:</strong><br>${(j.mitigated_summary||'No summary').replace(/\n/g,'<br/>')}`);
+  } catch (err) {
+    console.error(err);
+    addBotMessage('Error running mitigation.');
+  } finally {
+    hideLoading();
+  }
+}
+
+/* UI utilities */
+function addBotMessage(html) {
+  const node = document.createElement('div');
+  node.className = 'message bot';
+  node.innerHTML = `<div class="message-avatar">🤖</div><div class="message-content">${html}</div>`;
+  chatMessages.appendChild(node);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+function addUserMessage(text) {
+  const node = document.createElement('div');
+  node.className = 'message user';
+  node.innerHTML = `<div class="message-avatar">You</div><div class="message-content">${escapeHtml(text)}</div>`;
+  chatMessages.appendChild(node);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+function showLoading(){ loadingOverlay.classList.add('active'); }
+function hideLoading(){ loadingOverlay.classList.remove('active'); }
+
+function escapeHtml(s){ if(!s) return ''; return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;'); }
+
+/* Chat input handler */
+async function handleUserSend(){
+  const t = userInput.value.trim();
+  if(!t) return;
+  addUserMessage(t);
+  userInput.value = '';
+  showLoading();
+  try {
+    const res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: t, event: currentEvent || '', aspect: currentAspect || ''})});
+    const j = await res.json();
+    if (!j.success) {
+      addBotMessage('Server error: ' + (j.error || 'unknown'));
+    } else {
+      if (j.type === 'aspect_selection' && j.aspects) {
+        // Show aspects (simple)
+        addBotMessage(`Aspects for event: <br>${(j.aspects||[]).map(a=>`<button class="btn-small" onclick="(function(){ currentAspect='${a.replace(/'/g,"\\'")}'; addBotMessage('Selected aspect: <strong>${a}</strong>'); fetchArticles(currentEvent||j.event, '${a.replace(/'/g,"\\'")}', false, currentVerbosity); })()"> ${a} </button>`).join(' ')}`);
+      } else if (j.trigger_fetch) {
+        // If chat asked to trigger fetch, call fetchArticles
+        currentAspect = j.aspect || currentAspect;
+        await fetchArticles(j.event || currentEvent, currentAspect, false, currentVerbosity);
+      }
+      if (j.message) addBotMessage((j.message||'').replace(/\n/g,'<br/>'));
+    }
+  } catch (err) {
+    console.error(err);
+    addBotMessage('Failed to reach server.');
+  } finally { hideLoading(); }
+}
+
+/* Display bias metrics in info panel */
+function displayBiasMetrics(metrics) {
+  const container = document.getElementById('biasMetrics');
+  const coverage = metrics.overall_coverage || {};
+  const severity = metrics.bias_severity || {};
+  const total = metrics.total_articles || (currentArticles.length || 0);
+
+  let html = `<div style="display:flex;flex-direction:column;gap:8px">`;
+  html += `<div class="muted">Articles analyzed: <strong>${total}</strong></div>`;
+  const constituencies = {'poor':'Poor','middle_class':'Middle class','corporate':'Corporate','informal_sector':'Informal sector','government':'Government'};
+  for (const k in constituencies) {
+    const label = constituencies[k];
+    const val = (coverage[k] || 0) * 100;
+    html += `<div style="display:flex;justify-content:space-between"><div>${label}</div><div>${val ? val.toFixed(1)+'%' : '—'}</div></div>`;
+    html += `<div style="height:8px;background:#eef2f7;border-radius:8px;margin:6px 0"><div style="width:${Math.min(val,100)}%;height:100%;background:linear-gradient(90deg,#06b6d4,#10b981);border-radius:8px"></div></div>`;
+  }
+  if (Object.keys(severity).length) {
+    const max = Math.max(...Object.values(severity));
+    if (max > 0.1) {
+      html += `<div style="color:${'#b45309'}"><strong>Warning:</strong> Significant bias detected (severity ${max.toFixed(2)}).</div>`;
+    } else {
+      html += `<div style="color:${'#065f46'}">Coverage appears relatively balanced.</div>`;
+    }
+  }
+  html += `</div>`;
+  container.innerHTML = html;
+}
+</script>
+</body>
+</html>
+
