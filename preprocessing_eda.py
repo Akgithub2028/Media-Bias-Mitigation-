@@ -1,582 +1,632 @@
-import pandas as pd
-import numpy as np
+#!/usr/bin/env python3
+# preprocessing_eda.py
+"""
+Enhanced preprocessing + intense EDA for Indian news scraper outputs.
+
+Usage:
+    python preprocessing_eda.py --input /path/to/scraped_dir_or_file --outdir ./eda_outputs --topics 12
+
+Outputs:
+ - CSVs and PNGs saved to outdir
+ - Returns intermediate artifacts in a results dict when used as module
+Requirements:
+ pip install pandas numpy matplotlib seaborn scikit-learn nltk textblob wordcloud scipy tqdm
+"""
+
+import os
+import re
 import json
+import glob
+import math
+import argparse
+import warnings
+warnings.filterwarnings("ignore")
+
+from typing import List, Dict, Optional, Tuple
+
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
-from sklearn.decomposition import LatentDirichletAllocation
-from textblob import TextBlob
-import nltk
-from nltk.sentiment import SentimentIntensityAnalyzer
-from wordcloud import WordCloud
-import plotly.graph_objects as go
-import plotly.express as px
-from scipy.spatial.distance import euclidean
-from scipy.stats import ks_2samp
-import warnings
-warnings.filterwarnings('ignore')
 
-# Download required NLTK data
-nltk.download('vader_lexicon', quiet=True)
+from tqdm import tqdm
+from wordcloud import WordCloud
+
+import nltk
+from nltk.corpus import stopwords
+from nltk import word_tokenize, sent_tokenize
+from nltk.stem import WordNetLemmatizer
+from nltk.sentiment import SentimentIntensityAnalyzer
+from textblob import TextBlob
+
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation, PCA
+from sklearn.metrics import pairwise_distances
+from scipy.spatial.distance import euclidean
+from scipy.special import rel_entr
+
+# Ensure NLTK resources
 nltk.download('punkt', quiet=True)
 nltk.download('stopwords', quiet=True)
+nltk.download('wordnet', quiet=True)
+nltk.download('omw-1.4', quiet=True)
+nltk.download('vader_lexicon', quiet=True)
 
-class BiasAnalysisEDA:
-    """
-    Comprehensive EDA and preprocessing for bias analysis
-    Based on research paper methodology
-    """
-    
-    def __init__(self, articles_path=None):
-        """
-        Initialize with scraped articles
-        """
-        self.articles_df = None
-        if articles_path:
-            self.load_articles(articles_path)
-        
-        # Initialize sentiment analyzer
+# -----------------------
+# Utilities
+# -----------------------
+def safe_mkdir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+def read_jsonl(path: str) -> List[dict]:
+    out = []
+    with open(path, 'r', encoding='utf8') as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except Exception:
+                # try trimming trailing comma
+                try:
+                    out.append(json.loads(ln.rstrip(',')))
+                except:
+                    continue
+    return out
+
+def jensen_shannon(p: np.ndarray, q: np.ndarray, eps=1e-12) -> float:
+    p = np.asarray(p, dtype=np.float64) + eps
+    q = np.asarray(q, dtype=np.float64) + eps
+    p /= p.sum()
+    q /= q.sum()
+    m = 0.5 * (p + q)
+    return 0.5 * (rel_entr(p, m).sum() + rel_entr(q, m).sum())
+
+# -----------------------
+# Main class
+# -----------------------
+class PreprocessEDA:
+    def __init__(self, input_path: str, out_dir: str = "./eda_outputs"):
+        self.input_path = input_path
+        self.out_dir = out_dir
+        safe_mkdir(self.out_dir)
+
+        # NLP helpers
+        self.stopset = set(stopwords.words('english'))
+        self.lemmatizer = WordNetLemmatizer()
         self.sia = SentimentIntensityAnalyzer()
-        
-        # Define constituencies and their characteristics (from paper)
+
+        # Expanded constituency keywords (India-focused)
         self.constituencies = {
             'poor': {
-                'keywords': ['poverty', 'slum', 'hunger', 'unemployment', 'daily wage',
-                           'migrant worker', 'laborer', 'homeless', 'BPL', 'ration',
-                           'MGNREGA', 'below poverty line', 'informal labour'],
-                'color': '#e74c3c',
-                'weight': 1.0
+                'keywords': [
+                    'poverty','slum','hunger','unemployment','daily wage','migrant worker','laborer','homeless','bpl','ration',
+                    'mgnrega','below poverty line','informal labour','ration card','jan dhan','food security','aadhar','pds',
+                    'anganwadi','low income','manual scavenger','jobless','villager','daily wage earner','welfare','poverty line'
+                ],
+                'color': '#e74c3c'
             },
             'middle_class': {
-                'keywords': ['salary', 'EMI', 'tax', 'savings', 'education', 'urban',
-                           'professional', 'IT', 'bank account', 'credit card',
-                           'income tax', 'housing loan', 'salaried'],
-                'color': '#3498db',
-                'weight': 1.0
+                'keywords': [
+                    'salary','emi','tax','savings','education','urban','professional','it','bank account','credit card','income tax',
+                    'housing loan','salaried','gst returns','middle income','tuition fees','job market','metro','aspirational',
+                    'upper middle class','middle class','white collar','dual income'
+                ],
+                'color': '#3498db'
             },
             'corporate': {
-                'keywords': ['business', 'industry', 'company', 'profit', 'investment',
-                           'market', 'stock', 'CEO', 'enterprise', 'revenue',
-                           'sensex', 'nifty', 'corporate tax'],
-                'color': '#f39c12',
-                'weight': 1.0
+                'keywords': [
+                    'business','industry','company','profit','investment','market','stock','ceo','enterprise','revenue','sensex','nifty',
+                    'corporate tax','ipo','merger','acquisition','startup','venture capital','fdi','multinational','exports','imports',
+                    'private equity','shareholder','board','corporation','msme formal'
+                ],
+                'color': '#f39c12'
             },
             'informal_sector': {
-                'keywords': ['vendor', 'small business', 'trader', 'unorganized',
-                           'self-employed', 'shopkeeper', 'hawker', 'street vendor',
-                           'MSME', 'small trader', 'informal economy'],
-                'color': '#9b59b6',
-                'weight': 1.0
+                'keywords': [
+                    'vendor','small business','trader','unorganized','self-employed','shopkeeper','hawker','street vendor','msme',
+                    'informal economy','handicraft','artisan','daily trader','mandi','flea market','self help group','cottage industry',
+                    'microenterprise','local vendor','kiosk','tiffin', 'dabbawala'
+                ],
+                'color': '#9b59b6'
             },
             'government': {
-                'keywords': ['policy', 'minister', 'parliament', 'legislation', 'scheme',
-                           'government', 'official', 'bureaucrat', 'administration',
-                           'Modi', 'BJP', 'Congress', 'opposition'],
-                'color': '#27ae60',
-                'weight': 1.0
+                'keywords': [
+                    'policy','minister','parliament','legislation','scheme','government','official','bureaucrat','administration','modi',
+                    'bjp','congress','opposition','state govt','cabinet','ordinance','election','supreme court','rajya sabha','lok sabha',
+                    'policy reform','rbi','niti aayog','planning commission','scheme launch','govt scheme','gazette'
+                ],
+                'color': '#27ae60'
             }
         }
-        
-        # News source characteristics (from paper findings)
-        self.source_profiles = {
-            'Times of India': {'political': 'pro-BJP', 'ideological': 'pro-corporate'},
-            'The Hindu': {'political': 'pro-INC', 'ideological': 'anti-corporate'},
-            'Indian Express': {'political': 'pro-INC', 'ideological': 'neutral'},
-            'Hindustan Times': {'political': 'anti-INC', 'ideological': 'neutral'},
-            'Deccan Herald': {'political': 'anti-both', 'ideological': 'pro-poor'}
-        }
-    
-    def load_articles(self, path):
-        """Load scraped articles from JSON or CSV"""
-        if path.endswith('.json'):
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            self.articles_df = pd.DataFrame(data)
+
+        # loaded data
+        self.df: Optional[pd.DataFrame] = None
+
+    # -----------------------
+    # Data loading
+    # -----------------------
+    def load(self):
+        if os.path.isdir(self.input_path):
+            records = []
+            # look for jsonl/json/csv
+            for fp in glob.glob(os.path.join(self.input_path, "*.jsonl")) + glob.glob(os.path.join(self.input_path, "*.json")) + glob.glob(os.path.join(self.input_path, "*.csv")):
+                try:
+                    if fp.endswith(".jsonl"):
+                        records.extend(read_jsonl(fp))
+                    elif fp.endswith(".json"):
+                        with open(fp, 'r', encoding='utf8') as f:
+                            data = json.load(f)
+                        if isinstance(data, list):
+                            records.extend(data)
+                        elif isinstance(data, dict):
+                            records.append(data)
+                    elif fp.endswith(".csv"):
+                        df = pd.read_csv(fp)
+                        records.extend(df.to_dict('records'))
+                except Exception as e:
+                    print("Error reading", fp, e)
+            self.df = pd.DataFrame(records)
         else:
-            self.articles_df = pd.read_csv(path)
-        
-        print(f"Loaded {len(self.articles_df)} articles")
-        return self.articles_df
-    
-    def preprocess_text(self, text):
-        """Preprocess text for analysis"""
-        if pd.isna(text):
-            return ""
-        
-        # Convert to lowercase
-        text = str(text).lower()
-        
-        # Remove special characters but keep spaces
-        import re
-        text = re.sub(r'[^a-zA-Z\s]', '', text)
-        
-        # Remove extra whitespace
-        text = ' '.join(text.split())
-        
-        return text
-    
-    def extract_aspects_lda(self, articles, n_topics=15):
-        """
-        Extract aspects using LDA (paper's methodology)
-        """
-        # Preprocess articles
-        processed = [self.preprocess_text(art) for art in articles]
-        
-        # Vectorize
-        vectorizer = CountVectorizer(
-            max_df=0.95,
-            min_df=2,
-            stop_words='english',
-            max_features=1000  # Limited for Colab
-        )
-        
-        doc_term_matrix = vectorizer.fit_transform(processed)
-        
-        # LDA
-        lda = LatentDirichletAllocation(
-            n_components=n_topics,
-            random_state=42,
-            max_iter=50  # Limited iterations for Colab
-        )
-        
-        doc_topic_dist = lda.fit_transform(doc_term_matrix)
-        
-        # Get topic words
+            if self.input_path.endswith(".jsonl"):
+                self.df = pd.DataFrame(read_jsonl(self.input_path))
+            elif self.input_path.endswith(".json"):
+                with open(self.input_path, 'r', encoding='utf8') as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    self.df = pd.DataFrame(data)
+                else:
+                    self.df = pd.DataFrame([data])
+            elif self.input_path.endswith(".csv"):
+                self.df = pd.read_csv(self.input_path)
+            else:
+                raise ValueError("Unsupported input path type")
+
+        if self.df is None or self.df.empty:
+            raise ValueError("No articles loaded")
+
+        # Normalize columns: prefer content/text/body/article_text
+        content_cols = ['content','text','body','article_text','article','articleBody']
+        for c in content_cols:
+            if c in self.df.columns:
+                self.df['content'] = self.df.get('content', pd.Series(dtype=str)).fillna(self.df[c].astype(str))
+        if 'content' not in self.df.columns:
+            # try combining paragraphs
+            self.df['content'] = self.df.astype(str).sum(axis=1)
+
+        # Source
+        for c in ['source','handle','site','publisher','source_name']:
+            if c in self.df.columns:
+                self.df['source'] = self.df.get('source', pd.Series(dtype=str)).fillna(self.df[c].astype(str))
+        if 'source' not in self.df.columns:
+            self.df['source'] = 'Unknown'
+
+        # Title
+        for c in ['title','headline','heading']:
+            if c in self.df.columns:
+                self.df['title'] = self.df.get('title', pd.Series(dtype=str)).fillna(self.df[c].astype(str))
+
+        # created_at normalization (attempt parse)
+        if 'created_at' in self.df.columns:
+            try:
+                self.df['created_at'] = pd.to_datetime(self.df['created_at'], errors='coerce')
+            except:
+                self.df['created_at'] = pd.NaT
+        else:
+            self.df['created_at'] = pd.NaT
+
+        # dedupe by url or title or content hash
+        if 'url' in self.df.columns:
+            self.df = self.df.drop_duplicates(subset=['url'])
+        elif 'title' in self.df.columns:
+            self.df = self.df.drop_duplicates(subset=['title'])
+        else:
+            # hash content
+            self.df['__chash'] = self.df['content'].apply(lambda x: hash(str(x)[:2000]))
+            self.df = self.df.drop_duplicates(subset=['__chash'])
+            self.df.drop(columns=['__chash'], inplace=True)
+
+        # fill missing fields
+        self.df['source'] = self.df['source'].fillna('Unknown').astype(str)
+        self.df['title'] = self.df.get('title', pd.Series(['']*len(self.df))).fillna('').astype(str)
+        self.df['content'] = self.df['content'].fillna('').astype(str)
+        # basic length stats
+        self.df['char_count_raw'] = self.df['content'].apply(lambda x: len(x))
+        self.df['word_count_raw'] = self.df['content'].apply(lambda x: len(str(x).split()))
+        print(f"Loaded {len(self.df)} articles from {self.input_path}")
+        return self.df
+
+    # -----------------------
+    # Preprocessing
+    # -----------------------
+    def clean_text(self, text: str, lower: bool = True, remove_digits: bool = True, remove_punct: bool = True) -> str:
+        s = str(text) if text is not None else ""
+        if lower:
+            s = s.lower()
+        # remove urls
+        s = re.sub(r'http\S+|www\.\S+', ' ', s)
+        # remove emails
+        s = re.sub(r'\S+@\S+', ' ', s)
+        if remove_digits:
+            s = re.sub(r'\d+', ' ', s)
+        if remove_punct:
+            s = re.sub(r'[^\w\s]', ' ', s)
+        # normalize whitespace
+        s = re.sub(r'\s+', ' ', s).strip()
+        return s
+
+    def lemmatize_tokens(self, tokens: List[str]) -> List[str]:
+        return [self.lemmatizer.lemmatize(t) for t in tokens]
+
+    def preprocess(self, text_col: str = 'content', out_col: str = 'content_clean'):
+        if self.df is None:
+            raise ValueError("Load data first")
+        # apply cleaning
+        self.df[out_col] = self.df[text_col].apply(lambda x: self.clean_text(x))
+        # tokenize, remove stopwords, lemmatize
+        def tok_and_filter(s):
+            toks = [t for t in word_tokenize(s) if len(t) > 2]
+            toks = [t for t in toks if t not in self.stopset]
+            toks = self.lemmatize_tokens(toks)
+            return toks
+        tqdm.pandas(desc="Tokenizing")
+        self.df['tokens'] = self.df[out_col].progress_apply(tok_and_filter)
+        self.df['content_clean'] = self.df['tokens'].apply(lambda toks: " ".join(toks))
+        self.df['unique_tokens'] = self.df['tokens'].apply(lambda t: len(set(t)))
+        # sentences and sentiment
+        self.df['sentences'] = self.df['content'].apply(lambda x: sent_tokenize(x))
+        self.df['vader_compound'] = self.df['content'].apply(lambda x: self.sia.polarity_scores(x)['compound'] if x else 0)
+        self.df['textblob_polarity'] = self.df['content'].apply(lambda x: TextBlob(x).sentiment.polarity if x else 0)
+        # re-compute word counts on cleaned
+        self.df['word_count'] = self.df['content_clean'].apply(lambda x: len(str(x).split()))
+        self.df['char_count'] = self.df['content_clean'].apply(lambda x: len(x))
+        return self.df
+
+    # -----------------------
+    # Topic / aspect extraction
+    # -----------------------
+    def run_lda(self, docs: List[str], n_topics: int = 12, max_features: int = 3000, min_df: int = 5) -> Tuple[np.ndarray, List[dict], LatentDirichletAllocation, CountVectorizer]:
+        vectorizer = CountVectorizer(max_df=0.95, min_df=min_df, max_features=max_features)
+        dtm = vectorizer.fit_transform(docs)
+        lda = LatentDirichletAllocation(n_components=n_topics, random_state=42, max_iter=30)
+        doc_topic = lda.fit_transform(dtm)
         feature_names = vectorizer.get_feature_names_out()
         topics = []
-        for topic_idx, topic in enumerate(lda.components_):
-            top_words_idx = topic.argsort()[-10:][::-1]
-            top_words = [feature_names[i] for i in top_words_idx]
-            topics.append({
-                'topic_id': topic_idx,
-                'words': top_words,
-                'weight': topic[top_words_idx].tolist()
-            })
-        
-        return doc_topic_dist, topics, lda, vectorizer
-    
-    def calculate_sentiment(self, text):
-        """
-        Calculate sentiment scores (VADER + TextBlob)
-        """
-        if pd.isna(text) or text == "":
-            return {'compound': 0, 'positive': 0, 'negative': 0, 'neutral': 1}
-        
-        # VADER sentiment
-        scores = self.sia.polarity_scores(text)
-        
-        # TextBlob sentiment
-        try:
-            blob = TextBlob(text)
-            scores['textblob_polarity'] = blob.sentiment.polarity
-            scores['textblob_subjectivity'] = blob.sentiment.subjectivity
-        except:
-            scores['textblob_polarity'] = 0
-            scores['textblob_subjectivity'] = 0
-        
-        return scores
-    
-    def detect_constituency_alignment(self, text):
-        """
-        Detect constituency alignment in article (paper's methodology)
-        """
-        if pd.isna(text):
-            return {const: 0 for const in self.constituencies}
-        
-        text_lower = str(text).lower()
-        alignment_scores = {}
-        
-        for constituency, config in self.constituencies.items():
-            # Count keyword occurrences
-            keyword_count = sum(
-                text_lower.count(keyword.lower())
-                for keyword in config['keywords']
-            )
-            
-            # Normalize by text length
-            text_length = len(text_lower.split())
-            if text_length > 0:
-                alignment_scores[constituency] = (
-                    keyword_count * config['weight'] / text_length
-                )
-            else:
-                alignment_scores[constituency] = 0
-        
-        return alignment_scores
-    
-    def analyze_frame_bias(self, df):
-        """
-        Analyze framing bias for each news source
-        """
-        frame_analysis = []
-        
-        for source in df['source'].unique():
-            source_articles = df[df['source'] == source]
-            
-            # Initialize frame scores
-            frame_scores = {
-                f'{stance}_{const}': []
-                for const in self.constituencies
-                for stance in ['pro', 'anti']
-            }
-            
-            for _, article in source_articles.iterrows():
-                if pd.isna(article['content']):
-                    continue
-                
-                # Get sentiment
-                sentiment = self.calculate_sentiment(article['content'])
-                
-                # Get constituency alignment
-                alignment = self.detect_constituency_alignment(article['content'])
-                
-                # Calculate frame scores
-                for constituency, alignment_score in alignment.items():
-                    if sentiment['compound'] > 0.1:
-                        frame_scores[f'pro_{constituency}'].append(
-                            alignment_score * sentiment['compound']
-                        )
-                        frame_scores[f'anti_{constituency}'].append(0)
-                    elif sentiment['compound'] < -0.1:
-                        frame_scores[f'pro_{constituency}'].append(0)
-                        frame_scores[f'anti_{constituency}'].append(
-                            alignment_score * abs(sentiment['compound'])
-                        )
-                    else:
-                        frame_scores[f'pro_{constituency}'].append(alignment_score * 0.5)
-                        frame_scores[f'anti_{constituency}'].append(alignment_score * 0.5)
-            
-            # Average scores
-            avg_scores = {
-                frame: np.mean(scores) if scores else 0
-                for frame, scores in frame_scores.items()
-            }
-            avg_scores['source'] = source
-            frame_analysis.append(avg_scores)
-        
-        return pd.DataFrame(frame_analysis)
-    
-    def create_bias_visualizations(self, df):
-        """
-        Create comprehensive bias visualizations (following paper's style)
-        """
-        # Set style
-        plt.style.use('seaborn-v0_8-darkgrid')
-        fig = plt.figure(figsize=(20, 12))
-        
-        # 1. Constituency Coverage by Source (Bar Chart)
-        ax1 = plt.subplot(2, 3, 1)
-        constituency_coverage = []
-        
-        for source in df['source'].unique():
-            source_articles = df[df['source'] == source]
-            coverages = []
-            
-            for const in self.constituencies:
-                const_scores = []
-                for _, article in source_articles.iterrows():
-                    if pd.notna(article['content']):
-                        alignment = self.detect_constituency_alignment(article['content'])
-                        const_scores.append(alignment.get(const, 0))
-                coverages.append(np.mean(const_scores) if const_scores else 0)
-            
-            constituency_coverage.append(coverages)
-        
-        # Create grouped bar chart
-        x = np.arange(len(self.constituencies))
-        width = 0.15
-        
-        for i, source in enumerate(df['source'].unique()):
-            ax1.bar(x + i*width, constituency_coverage[i], width, label=source)
-        
-        ax1.set_xlabel('Constituency')
-        ax1.set_ylabel('Relative Coverage')
-        ax1.set_title('Constituency Coverage by News Source')
-        ax1.set_xticks(x + width * 2)
-        ax1.set_xticklabels(list(self.constituencies.keys()))
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # 2. Sentiment Distribution by Source
-        ax2 = plt.subplot(2, 3, 2)
-        sentiment_data = []
-        
-        for source in df['source'].unique():
-            source_articles = df[df['source'] == source]
-            sentiments = []
-            for _, article in source_articles.iterrows():
-                if pd.notna(article['content']):
-                    sent = self.calculate_sentiment(article['content'])
-                    sentiments.append(sent['compound'])
-            
-            if sentiments:
-                sentiment_data.append(sentiments)
-        
-        ax2.violinplot(sentiment_data, positions=range(len(df['source'].unique())),
-                      widths=0.7, showmeans=True, showmedians=True)
-        ax2.set_xticks(range(len(df['source'].unique())))
-        ax2.set_xticklabels(df['source'].unique(), rotation=45)
-        ax2.set_ylabel('Sentiment Score')
-        ax2.set_title('Sentiment Distribution by News Source')
-        ax2.axhline(y=0, color='red', linestyle='--', alpha=0.5)
-        ax2.grid(True, alpha=0.3)
-        
-        # 3. Frame Bias Heatmap
-        ax3 = plt.subplot(2, 3, 3)
-        frame_df = self.analyze_frame_bias(df)
-        
-        # Prepare data for heatmap
-        frame_matrix = []
-        for source in df['source'].unique():
-            source_frames = frame_df[frame_df['source'] == source]
-            if not source_frames.empty:
-                row = []
-                for const in self.constituencies:
-                    pro_score = source_frames[f'pro_{const}'].values[0] if not source_frames.empty else 0
-                    anti_score = source_frames[f'anti_{const}'].values[0] if not source_frames.empty else 0
-                    row.append(pro_score - anti_score)  # Net bias
-                frame_matrix.append(row)
-        
-        if frame_matrix:
-            im = ax3.imshow(frame_matrix, cmap='RdBu_r', aspect='auto', vmin=-0.05, vmax=0.05)
-            ax3.set_xticks(range(len(self.constituencies)))
-            ax3.set_xticklabels(list(self.constituencies.keys()), rotation=45)
-            ax3.set_yticks(range(len(df['source'].unique())))
-            ax3.set_yticklabels(df['source'].unique())
-            ax3.set_title('Frame Bias Heatmap (Pro-Anti Score)')
-            plt.colorbar(im, ax=ax3)
-        
-        # 4. Word Cloud for Poor Constituency
-        ax4 = plt.subplot(2, 3, 4)
-        poor_keywords = ' '.join(self.constituencies['poor']['keywords'] * 10)
-        
-        if poor_keywords:
-            wordcloud = WordCloud(width=400, height=300, 
-                                 background_color='white',
-                                 colormap='Reds').generate(poor_keywords)
-            ax4.imshow(wordcloud, interpolation='bilinear')
-            ax4.set_title('Keywords: Poor Constituency')
-            ax4.axis('off')
-        
-        # 5. Aspect Coverage Distribution (from paper's methodology)
-        ax5 = plt.subplot(2, 3, 5)
-        
-        if 'event' in df.columns:
-            event_counts = df['event'].value_counts()
-            colors = ['#e74c3c', '#3498db', '#f39c12', '#27ae60', '#9b59b6']
-            ax5.pie(event_counts.values, labels=event_counts.index, 
-                   autopct='%1.1f%%', colors=colors[:len(event_counts)])
-            ax5.set_title('Article Distribution by Event')
-        
-        # 6. Bias Score Summary
-        ax6 = plt.subplot(2, 3, 6)
-        
-        # Calculate aggregate bias scores
-        bias_scores = []
-        for source in df['source'].unique():
-            source_articles = df[df['source'] == source]
-            
-            # Calculate various bias metrics
-            poor_coverage = 0
-            middle_coverage = 0
-            corp_coverage = 0
-            
-            for _, article in source_articles.iterrows():
-                if pd.notna(article['content']):
-                    alignment = self.detect_constituency_alignment(article['content'])
-                    poor_coverage += alignment.get('poor', 0)
-                    middle_coverage += alignment.get('middle_class', 0)
-                    corp_coverage += alignment.get('corporate', 0)
-            
-            n = len(source_articles)
-            if n > 0:
-                bias_scores.append({
-                    'source': source,
-                    'poor_bias': poor_coverage / n,
-                    'middle_bias': middle_coverage / n,
-                    'corp_bias': corp_coverage / n
-                })
-        
-        if bias_scores:
-            bias_df = pd.DataFrame(bias_scores)
-            x_pos = np.arange(len(bias_df))
-            
-            ax6.bar(x_pos - 0.25, bias_df['poor_bias'], 0.25, 
-                   label='Poor', color='#e74c3c')
-            ax6.bar(x_pos, bias_df['middle_bias'], 0.25, 
-                   label='Middle Class', color='#3498db')
-            ax6.bar(x_pos + 0.25, bias_df['corp_bias'], 0.25, 
-                   label='Corporate', color='#f39c12')
-            
-            ax6.set_xticks(x_pos)
-            ax6.set_xticklabels(bias_df['source'], rotation=45)
-            ax6.set_ylabel('Bias Score')
-            ax6.set_title('Constituency Bias Comparison')
-            ax6.legend()
-            ax6.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig('bias_analysis_eda.png', dpi=300, bbox_inches='tight')
-        plt.show()
-        
-        return fig
-    
-    def generate_bias_report(self, df):
-        """
-        Generate comprehensive bias analysis report
-        """
-        print("\n" + "="*80)
-        print(" MEDIA BIAS ANALYSIS REPORT ".center(80))
-        print("="*80)
-        
-        # 1. Overall Statistics
-        print("\n1. DATASET OVERVIEW")
-        print("-" * 40)
-        print(f"Total Articles: {len(df)}")
-        print(f"News Sources: {df['source'].nunique()}")
-        if 'event' in df.columns:
-            print(f"Events Covered: {df['event'].nunique()}")
-        print(f"Date Range: {df['scraped_at'].min()} to {df['scraped_at'].max()}")
-        
-        # 2. Source-wise Analysis
-        print("\n2. SOURCE-WISE ANALYSIS")
-        print("-" * 40)
-        
-        for source in df['source'].unique():
-            source_articles = df[df['source'] == source]
-            print(f"\n{source}:")
-            print(f"  Articles: {len(source_articles)}")
-            
-            # Average sentiment
-            sentiments = []
-            for _, article in source_articles.iterrows():
-                if pd.notna(article['content']):
-                    sent = self.calculate_sentiment(article['content'])
-                    sentiments.append(sent['compound'])
-            
-            if sentiments:
-                print(f"  Avg Sentiment: {np.mean(sentiments):.3f}")
-                print(f"  Sentiment Std: {np.std(sentiments):.3f}")
-            
-            # Political profile (from paper)
-            if source in self.source_profiles:
-                profile = self.source_profiles[source]
-                print(f"  Political Lean: {profile['political']}")
-                print(f"  Ideological: {profile['ideological']}")
-        
-        # 3. Constituency Coverage Analysis
-        print("\n3. CONSTITUENCY COVERAGE ANALYSIS")
-        print("-" * 40)
-        
-        overall_coverage = {const: [] for const in self.constituencies}
-        
-        for _, article in df.iterrows():
-            if pd.notna(article['content']):
-                alignment = self.detect_constituency_alignment(article['content'])
-                for const, score in alignment.items():
-                    overall_coverage[const].append(score)
-        
-        print("\nAverage Coverage Scores:")
-        for const, scores in overall_coverage.items():
-            if scores:
-                avg_score = np.mean(scores)
-                print(f"  {const.replace('_', ' ').title()}: {avg_score:.4f}")
-        
-        # 4. Bias Indicators
-        print("\n4. KEY BIAS INDICATORS")
-        print("-" * 40)
-        
-        # Calculate bias metrics
-        poor_coverage_avg = np.mean(overall_coverage['poor']) if overall_coverage['poor'] else 0
-        middle_coverage_avg = np.mean(overall_coverage['middle_class']) if overall_coverage['middle_class'] else 0
-        corp_coverage_avg = np.mean(overall_coverage['corporate']) if overall_coverage['corporate'] else 0
-        
-        bias_ratio = middle_coverage_avg / poor_coverage_avg if poor_coverage_avg > 0 else float('inf')
-        
-        print(f"\nMiddle Class to Poor Coverage Ratio: {bias_ratio:.2f}")
-        print(f"Corporate to Poor Coverage Ratio: {corp_coverage_avg/poor_coverage_avg if poor_coverage_avg > 0 else 'N/A':.2f}")
-        
-        # Identify most biased source
-        max_bias_source = None
-        max_bias_score = 0
-        
-        for source in df['source'].unique():
-            source_articles = df[df['source'] == source]
-            poor_scores = []
-            middle_scores = []
-            
-            for _, article in source_articles.iterrows():
-                if pd.notna(article['content']):
-                    alignment = self.detect_constituency_alignment(article['content'])
-                    poor_scores.append(alignment.get('poor', 0))
-                    middle_scores.append(alignment.get('middle_class', 0))
-            
-            if poor_scores and middle_scores:
-                source_bias = np.mean(middle_scores) - np.mean(poor_scores)
-                if abs(source_bias) > max_bias_score:
-                    max_bias_score = abs(source_bias)
-                    max_bias_source = source
-        
-        if max_bias_source:
-            print(f"\nMost Biased Source: {max_bias_source} (bias score: {max_bias_score:.4f})")
-        
-        # 5. Recommendations
-        print("\n5. BIAS MITIGATION RECOMMENDATIONS")
-        print("-" * 40)
-        
-        if bias_ratio > 2:
-            print("⚠ HIGH BIAS DETECTED: Middle class coverage significantly exceeds poor coverage")
-            print("Recommendations:")
-            print("  • Increase coverage of poverty-related issues")
-            print("  • Include more perspectives from marginalized communities")
-            print("  • Balance political rhetoric with ground-level reporting")
-        elif bias_ratio > 1.5:
-            print("⚠ MODERATE BIAS: Some imbalance in constituency coverage")
-            print("Recommendations:")
-            print("  • Diversify sources and perspectives")
-            print("  • Include more informal sector voices")
-        else:
-            print("✓ Relatively balanced coverage across constituencies")
-        
-        print("\n" + "="*80)
-        
-        return overall_coverage
+        for i, comp in enumerate(lda.components_):
+            top_idx = comp.argsort()[-15:][::-1]
+            top_words = [feature_names[j] for j in top_idx]
+            topics.append({'topic_id': i, 'words': top_words, 'weights': comp[top_idx].tolist()})
+        return doc_topic, topics, lda, vectorizer
 
-# Example usage
-if __name__ == "__main__":
-    # Initialize analyzer
-    analyzer = BiasAnalysisEDA()
-    
-    # Create sample data for demonstration
-    sample_articles = [
-        {
-            'source': 'Times of India',
-            'content': 'The stock market surged today as corporate profits exceeded expectations. Major companies reported strong quarterly results.',
-            'event': 'demonetization',
-            'scraped_at': '2024-01-01'
-        },
-        {
-            'source': 'The Hindu',
-            'content': 'Daily wage workers continue to struggle with unemployment. The poverty situation has worsened in slum areas.',
-            'event': 'migrant_crisis',
-            'scraped_at': '2024-01-02'
-        },
-        {
-            'source': 'Indian Express',
-            'content': 'The government announced new policy measures in parliament today. Ministers discussed the implementation of schemes.',
-            'event': 'gst',
-            'scraped_at': '2024-01-03'
+    def assign_topics(self, doc_topic: np.ndarray, threshold: float = 0.25) -> List[List[int]]:
+        assignments = []
+        for row in doc_topic:
+            assigned = [i for i, v in enumerate(row) if v >= threshold]
+            if not assigned:
+                assigned = [int(np.argmax(row))]
+            assignments.append(assigned)
+        return assignments
+
+    # -----------------------
+    # Constituency alignment
+    # -----------------------
+    def constituency_scores(self, text: str, tfidf_vec: Optional[TfidfVectorizer] = None, topic_words: Optional[List[str]] = None) -> Dict[str, float]:
+        """
+        Compute normalized constituency scores:
+          - simple keyword overlap normalized by doc length
+          - optionally combine TF-IDF affinity by checking overlap with topic_words
+        """
+        scores = {k: 0.0 for k in self.constituencies.keys()}
+        if not text or len(text.strip()) == 0:
+            return scores
+        text_l = text.lower()
+        words = text_l.split()
+        L = max(1, len(words))
+        # keyword counts
+        for cname, cinfo in self.constituencies.items():
+            hits = sum(text_l.count(kw) for kw in cinfo['keywords'])
+            scores[cname] = hits / L
+        # extra: if topic_words provided, boost constituency mapping where topic words match keywords
+        if topic_words:
+            # topic_words is list of strings (words) from a topic/aspect
+            for cname, cinfo in self.constituencies.items():
+                common = sum(1 for w in topic_words if any(kw in w or w in kw for kw in cinfo['keywords']))
+                # small boost normalized
+                scores[cname] += 0.2 * (common / max(1, len(topic_words)))
+        # normalize to sum <=1 (not strictly necessary)
+        total = sum(abs(v) for v in scores.values()) or 1.0
+        for k in scores:
+            scores[k] = scores[k] / total
+        return scores
+
+    # -----------------------
+    # Coverage & frame computation (approximate)
+    # -----------------------
+    def coverage_by_source(self, assignments: List[List[int]], topics: List[dict]) -> pd.DataFrame:
+        df = self.df.copy()
+        df['topic_assignments'] = assignments
+        n_topics = len(topics)
+        sources = df['source'].unique()
+        rows = []
+        for src in sources:
+            src_df = df[df['source'] == src]
+            total_words = src_df['word_count'].sum() or 1
+            # per topic, compute word share
+            shares = []
+            for t in range(n_topics):
+                mask = src_df['topic_assignments'].apply(lambda a: t in a)
+                words_t = src_df[mask]['word_count'].sum()
+                shares.append(words_t / total_words)
+            row = {'source': src}
+            row.update({f'aspect_{i}': shares[i] for i in range(n_topics)})
+            rows.append(row)
+        cov_df = pd.DataFrame(rows).fillna(0)
+        return cov_df
+
+    def compute_frame_matrix(self, doc_topic: np.ndarray, topics: List[dict]) -> Tuple[pd.DataFrame, np.ndarray]:
+        """
+        Approximate frame matrix M(n,c).
+        Steps:
+         - primary topic per doc = argmax(doc_topic)
+         - compute sentiment offset per topic (Sian - Savg(a))
+         - approximate topic->constituency mapping U[a,c] via overlap between topic words & constituency keywords (and small TF-IDF boost)
+         - compute M[n,c] = sum_a U[a,c] * San (weighted by word counts)
+        """
+        df = self.df.reset_index(drop=True).copy()
+        primary = np.argmax(doc_topic, axis=1)
+        df['primary_topic'] = primary
+        n_topics = doc_topic.shape[1]
+        consts = list(self.constituencies.keys())
+        # avg sentiment per topic
+        aspect_sent = {}
+        for a in range(n_topics):
+            mask = df['primary_topic'] == a
+            aspect_sent[a] = df.loc[mask, 'vader_compound'].mean() if mask.sum() > 0 else 0.0
+
+        # build U matrix
+        U = {}
+        for a, tinfo in enumerate(topics):
+            twords = tinfo['words']
+            affin = {}
+            for c in consts:
+                kwset = set(self.constituencies[c]['keywords'])
+                overlap = sum(1 for w in twords if any(kw in w or w in kw for kw in kwset))
+                # also check substring matches in constituency keywords vs topic words
+                substr = sum(1 for w in twords for kw in kwset if kw in w or w in kw)
+                affin[c] = overlap + 0.3 * substr
+            # normalize affinities to probabilities
+            total = sum(affin.values()) or 1.0
+            U[a] = {c: affin[c] / total for c in consts}
+
+        # compute M per source
+        sources = df['source'].unique()
+        M_list = []
+        frame_rows = []
+        for src in sources:
+            src_df = df[df['source'] == src]
+            # group by topic
+            M_row = {c: 0.0 for c in consts}
+            for a in range(n_topics):
+                mask = src_df['primary_topic'] == a
+                if mask.sum() == 0:
+                    continue
+                words_a = src_df.loc[mask, 'word_count']
+                total_words_a = words_a.sum() or 1.0
+                # compute San = sum_i Cian * (Sian - Savg(a)); Cian = words_i / total_words_a
+                Sian_minus = src_df.loc[mask, 'vader_compound'] - aspect_sent[a]
+                Cian = words_a / total_words_a
+                San = (Cian.values * Sian_minus.values).sum()
+                for c in consts:
+                    M_row[c] += U[a][c] * San
+            M_list.append([M_row[c] for c in consts])
+            # store pro/anti
+            row = {'source': src}
+            for c in consts:
+                val = M_row[c]
+                row[f'pro_{c}'] = max(0, val)
+                row[f'anti_{c}'] = max(0, -val)
+            frame_rows.append(row)
+        frame_df = pd.DataFrame(frame_rows).fillna(0)
+        M = np.array(M_list)
+        return frame_df, M, consts
+
+    # -----------------------
+    # EDA plots & saves
+    # -----------------------
+    def plot_basic(self):
+        df = self.df
+        safe_mkdir(self.out_dir)
+        # articles per source
+        plt.figure(figsize=(10,5))
+        vc = df['source'].value_counts().nlargest(30)
+        sns.barplot(x=vc.index, y=vc.values)
+        plt.xticks(rotation=45, ha='right')
+        plt.title("Articles per source")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, "articles_per_source.png"), dpi=200)
+        plt.close()
+
+        # length distribution
+        plt.figure(figsize=(8,4))
+        sns.histplot(df['word_count'], bins=60, kde=True)
+        plt.title("Word count distribution (cleaned)")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, "wordcount_distribution.png"), dpi=200)
+        plt.close()
+
+        # sentiment by source (violin)
+        plt.figure(figsize=(12,6))
+        top_src = df['source'].value_counts().nlargest(12).index
+        sns.violinplot(x='source', y='vader_compound', data=df[df['source'].isin(top_src)], inner='quartile')
+        plt.xticks(rotation=45, ha='right')
+        plt.title("VADER sentiment by top sources")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, "sentiment_by_source_violin.png"), dpi=200)
+        plt.close()
+
+    def plot_wordclouds(self, topics: List[dict], top_n: int = 6):
+        # topic wordclouds
+        for t in topics[:top_n]:
+            words = " ".join(t['words'])
+            wc = WordCloud(width=800, height=400, background_color='white').generate(words)
+            plt.figure(figsize=(10,4))
+            plt.imshow(wc, interpolation='bilinear')
+            plt.axis('off')
+            plt.title(f"Topic {t['topic_id']} wordcloud")
+            plt.tight_layout()
+            plt.savefig(os.path.join(self.out_dir, f"topic_{t['topic_id']}_wordcloud.png"), dpi=200)
+            plt.close()
+
+    def plot_frame_heatmap(self, M: np.ndarray, sources: List[str], consts: List[str]):
+        if M.size == 0:
+            return
+        plt.figure(figsize=(10, max(4, len(sources) * 0.35)))
+        sns.heatmap(M, cmap='RdBu_r', center=0, xticklabels=consts, yticklabels=sources, annot=False)
+        plt.title("Frame alignment matrix M(n,c) (signed)")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, "frame_alignment_heatmap.png"), dpi=200)
+        plt.close()
+
+    def plot_pca(self, M: np.ndarray, sources: List[str]):
+        if M.shape[0] < 2:
+            return
+        pca = PCA(n_components=2)
+        X = pca.fit_transform(M)
+        plt.figure(figsize=(8,6))
+        sns.scatterplot(x=X[:,0], y=X[:,1])
+        for i, s in enumerate(sources):
+            plt.text(X[i,0]+0.01, X[i,1]+0.01, s, fontsize=9)
+        plt.title("PCA of sources from frame matrix")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, "frame_pca.png"), dpi=200)
+        plt.close()
+
+    def plot_coverage_distances(self, cov_df: pd.DataFrame):
+        aspect_cols = [c for c in cov_df.columns if c.startswith('aspect_')]
+        if not aspect_cols:
+            return
+        mean_vec = cov_df[aspect_cols].mean().values
+        cov_df['euclidean_to_mean'] = cov_df[aspect_cols].apply(lambda r: euclidean(r.values, mean_vec), axis=1)
+        cov_df['jsd_to_mean'] = cov_df[aspect_cols].apply(lambda r: jensen_shannon(r.values, mean_vec), axis=1)
+        cov_df.to_csv(os.path.join(self.out_dir, "coverage_distances.csv"), index=False)
+
+        plt.figure(figsize=(10,5))
+        sns.barplot(x='source', y='euclidean_to_mean', data=cov_df.sort_values('euclidean_to_mean', ascending=False).head(30))
+        plt.xticks(rotation=45, ha='right')
+        plt.title("Top sources by Euclidean distance to mean coverage")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, "euclidean_distance_to_mean.png"), dpi=200)
+        plt.close()
+
+    def plot_constituency_histograms(self):
+        # compute constituency scores per article and aggregate by source
+        cols = list(self.constituencies.keys())
+        cscores = self.df['content_clean'].apply(lambda t: pd.Series(self.constituency_scores(t)))
+        cscores.columns = [f'const_{c}' for c in cols]
+        out = pd.concat([self.df[['source']], cscores], axis=1)
+        agg = out.groupby('source').mean().reset_index()
+        # melt and plot top sources
+        top_src = self.df['source'].value_counts().nlargest(12).index
+        agg_top = agg[agg['source'].isin(top_src)]
+        melted = agg_top.melt(id_vars='source', var_name='const', value_name='score')
+        plt.figure(figsize=(12,6))
+        sns.barplot(x='source', y='score', hue='const', data=melted)
+        plt.xticks(rotation=45, ha='right')
+        plt.title("Average constituency alignment scores for top sources")
+        plt.legend(bbox_to_anchor=(1.02,1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, "constituency_alignment_by_source.png"), dpi=200)
+        plt.close()
+
+    def timeline_trends(self):
+        if 'created_at' not in self.df.columns or self.df['created_at'].isna().all():
+            return
+        df = self.df.copy()
+        df = df.dropna(subset=['created_at'])
+        df['date'] = df['created_at'].dt.date
+        # daily counts per event or source
+        plt.figure(figsize=(12,5))
+        daily = df.groupby('date').size().reset_index(name='count')
+        sns.lineplot(x='date', y='count', data=daily)
+        plt.xticks(rotation=45)
+        plt.title("Daily article counts")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, "daily_article_counts.png"), dpi=200)
+        plt.close()
+
+        # daily avg sentiment
+        plt.figure(figsize=(12,5))
+        daily_sent = df.groupby('date')['vader_compound'].mean().reset_index()
+        sns.lineplot(x='date', y='vader_compound', data=daily_sent)
+        plt.xticks(rotation=45)
+        plt.title("Daily average VADER sentiment")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.out_dir, "daily_sentiment_trend.png"), dpi=200)
+        plt.close()
+
+    # -----------------------
+    # Run pipeline
+    # -----------------------
+    def run(self, n_topics: int = 12, min_df: int = 5, max_features: int = 3000, assign_thresh: float = 0.25):
+        # load and preprocess
+        self.load()
+        self.preprocess()
+
+        # LDA
+        docs = self.df['content_clean'].fillna("").tolist()
+        print("Running LDA...")
+        doc_topic, topics, lda_model, vectorizer = self.run_lda(docs, n_topics=n_topics, max_features=max_features, min_df=min_df)
+        # assignments
+        assignments = self.assign_topics(doc_topic, threshold=assign_thresh)
+        self.df['topic_assignments'] = assignments
+        # save topics
+        topics_df = pd.DataFrame([{'topic_id': t['topic_id'], 'top_words': ",".join(t['words'])} for t in topics])
+        topics_df.to_csv(os.path.join(self.out_dir, "lda_topics.csv"), index=False)
+
+        # coverage
+        cov_df = self.coverage_by_source(assignments, topics)
+        cov_df.to_csv(os.path.join(self.out_dir, "aspect_coverage_by_source.csv"), index=False)
+
+        # frame matrix
+        print("Computing frame matrix...")
+        frame_df, M, consts = self.compute_frame_matrix(doc_topic, topics)
+        frame_df.to_csv(os.path.join(self.out_dir, "frame_df.csv"), index=False)
+        np.save(os.path.join(self.out_dir, "frame_matrix.npy"), M)
+
+        # plots
+        print("Producing plots...")
+        self.plot_basic()
+        self.plot_wordclouds(topics, top_n=8)
+        sources = list(self.df['source'].unique())
+        self.plot_frame_heatmap(M, sources, consts)
+        self.plot_pca(M, sources)
+        self.plot_coverage_distances(cov_df)
+        self.plot_constituency_histograms()
+        self.timeline_trends()
+
+        print("All outputs saved to:", self.out_dir)
+        return {
+            'df': self.df,
+            'doc_topic': doc_topic,
+            'topics': topics,
+            'cov_df': cov_df,
+            'frame_df': frame_df,
+            'frame_matrix': M
         }
-    ]
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(sample_articles)
-    analyzer.articles_df = df
-    
-    # Generate visualizations
-    print("Generating bias analysis visualizations...")
-    analyzer.create_bias_visualizations(df)
-    
-    # Generate report
-    print("\nGenerating bias report...")
-    analyzer.generate_bias_report(df)
+
+# -----------------------
+# CLI
+# -----------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Preprocessing + intense EDA for scraped Indian news")
+    parser.add_argument("--input", required=True, help="input directory or file (JSONL/JSON/CSV)")
+    parser.add_argument("--outdir", default="./eda_outputs", help="output directory for CSVs/PNGs")
+    parser.add_argument("--topics", type=int, default=12, help="number of LDA topics")
+    parser.add_argument("--min_df", type=int, default=5, help="LDA min_df")
+    parser.add_argument("--max_features", type=int, default=3000, help="LDA max features")
+    parser.add_argument("--assign_thresh", type=float, default=0.25, help="topic assignment threshold")
+    args = parser.parse_args()
+
+    eda = PreprocessEDA(args.input, args.outdir)
+    eda.run(n_topics=args.topics, min_df=args.min_df, max_features=args.max_features, assign_thresh=args.assign_thresh)
